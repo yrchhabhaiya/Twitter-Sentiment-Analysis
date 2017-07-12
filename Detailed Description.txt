@@ -1,0 +1,172 @@
+***********Twitter data can be extracted through Flume into PIG with the help of below steps.***********
+	1. Start the services.
+	2. Create Twitter App and generate consumerKey, consumerSecretKey, accessToken & accessTokenSecret.
+	3. Write Flume Config. (FlumeData collected is in Avro format.)
+	4. Get the Avro schema from FlumeData and save it as AVSC file.
+	5. Create Table in HIVE with the help of AVSC file.
+	6. Create External Table HIVE and save it in HDFS location.
+	7. Load data in PIG relation for further analysis.
+---------------------------------------------------------------------------------------------------------
+
+1. Start the services:
+	Below service should be starte in order to begin with the assignment.
+	a. HDFS Services: Required for HDFS environment to be running.
+		[acadgild@localhost ~]$ start-all.sh
+		[acadgild@localhost ~]$ jps
+	b. JobHistoryServer: Required for PIG to run in MapReduce mode.
+		[acadgild@localhost ~]$ mr-jobhistory-daemon.sh start historyserver
+		[acadgild@localhost ~]$ jps
+	c. mysqld: Required for HIVE shell.
+		[acadgild@localhost ~]$ sudo service mysqld status
+		[acadgild@localhost ~]$ sudo service mysqld start
+		[acadgild@localhost ~]$ sudo service mysqld status
+Screenshot: Services.png
+
+-----------------------------------------------------------------------------------------------------------
+
+2. Create Twitter App and generate consumerKey, consumerSecretKey, accessToken & accessTokenSecret.
+	Login to the link https://apps.twitter.com/ with your twitter account.
+	Create the application and fill in required details.
+	Go to "Keys and Access Token" tab and generate above parameters which is required by Flume agent.
+
+-----------------------------------------------------------------------------------------------------------
+
+3. Write Flume Config. (FlumeData collected is in Avro format.)
+	Flume config file: flume_twitter.conf
+	Command to run the flume agent.
+		[acadgild@localhost ~]$ flume-ng agent -n TwitterAgent -f flume_twitter.conf
+	pres cntrl+c to stop the process when FlumeData file is created.
+
+-----------------------------------------------------------------------------------------------------------
+
+4. Get the Avro schema from FlumeData and save it as AVSC file.
+	Run the below command and check the first record, please refer screenshot AvroSchema.png. That is your Avro schema.
+		[acadgild@localhost project]$ hadoop fs -cat /user/flume/tweets/FlumeData.1499696802953
+	Copy the schema and create new AVSC file TwitterDataAvroSchema.avsc
+Screenshot: AvroSchema.png
+AVSC File: TwitterDataAvroSchema.avsc
+
+-----------------------------------------------------------------------------------------------------------
+
+5. Create Table in HIVE with the help of AVSC file.
+	Launch HIVE shell with the help of below command.
+	[acadgild@localhost project]$ hive
+
+	Create table as below:
+
+	CREATE TABLE tweets
+	  ROW FORMAT SERDE
+	     'org.apache.hadoop.hive.serde2.avro.AvroSerDe'
+	  STORED AS INPUTFORMAT
+	     'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat'
+	  OUTPUTFORMAT
+	     'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
+	  TBLPROPERTIES ('avro.schema.url'='file:///home/acadgild/project/TwitterDataAvroSchema.avsc') ;
+
+	DESCRIBE tweets;
+
+	LOAD DATA INPATH '/user/flume/tweets/FlumeData.1499696802953' OVERWRITE INTO TABLE tweets;
+
+HQL File: CreateHiveTable.hql
+ScreenShot: CreateHiveTable.png
+
+-----------------------------------------------------------------------------------------------------------
+
+6. Create External Table HIVE and save it in HDFS location.
+	Copy the table description from tweets table and creat external table as below:
+	
+CREATE EXTERNAL TABLE tweets_avro_table (
+        id                      string,
+        user_friends_count      int   ,
+        user_location           string,
+        user_description        string,
+        user_statuses_count     int   ,
+        user_followers_count    int   ,
+        user_name               string,
+        user_screen_name        string,
+        created_at              string,
+        text                    string,
+        retweet_count           bigint,
+        retweeted               boolean,
+        in_reply_to_user_id     bigint,
+        source                  string,
+        in_reply_to_status_id   bigint,
+        media_url_https         string,
+        expanded_url            string
+        )
+STORED AS AVRO
+LOCATION '/user/externaltables/';
+
+INSERT OVERWRITE TABLE tweets_avro_table SELECT * FROM tweets LIMIT 2500;
+
+	This external table stores data as AVRO at location /user/externaltables/ which is having 2500 tweets.
+
+HQL File: CreatExternalHiveTable.hql
+Screenshot: CreatExternalHiveTable.png
+	
+	On this tweets_avro_table table normal operations can be performed since it is having definite schema. for excample.
+
+Screenshot: NormalHiveQueries.png
+
+-----------------------------------------------------------------------------------------------------------
+7. Load data in PIG relation for further analysis.
+
+	Use below schema to load data into Pig relation:
+	A = LOAD '/user/externaltables/000000_0' USING AvroStorage('{"type":"record",
+ "name":"Doc",
+ "doc":"adoc",
+ "fields":[{"name":"id","type":"string"},
+           {"name":"user_friends_count","type":["int","null"]},
+           {"name":"user_location","type":["string","null"]},
+           {"name":"user_description","type":["string","null"]},
+           {"name":"user_statuses_count","type":["int","null"]},
+           {"name":"user_followers_count","type":["int","null"]},
+           {"name":"user_name","type":["string","null"]},
+           {"name":"user_screen_name","type":["string","null"]},
+           {"name":"created_at","type":["string","null"]},
+           {"name":"text","type":["string","null"]},
+           {"name":"retweet_count","type":["long","null"]},
+           {"name":"retweeted","type":["boolean","null"]},
+           {"name":"in_reply_to_user_id","type":["long","null"]},
+           {"name":"source","type":["string","null"]},
+           {"name":"in_reply_to_status_id","type":["long","null"]},
+           {"name":"media_url_https","type":["string","null"]},
+           {"name":"expanded_url","type":["string","null"]}
+          ]
+}');
+
+---Search for the keayword 'hate' & 'love'
+B = FILTER A BY (text matches '.* hate .*') OR (text matches '.* love .*');
+C = FOREACH B GENERATE id, user_name, user_followers_count, text;
+D = ORDER C BY user_followers_count DESC;
+
+---Flatten file wih each word in text of the tweets to identify rating of each word.
+tokens = foreach D generate id,text, FLATTEN(TOKENIZE(text)) As word;
+
+---load dictionary having ratings for around 2500 words
+dictionary = LOAD '/user/acadgild/project/twitter/AFINN.txt' USING PigStorage('\t') AS(word:chararray,rating:int);
+
+---perform mapjoin to get rating of each word in tweet.
+word_rating = JOIN tokens BY word LEFT OUTER, dictionary BY word USING 'replicated';
+rating = foreach word_rating generate tokens::id as id,tokens::text as text, dictionary::rating as rate;
+word_group = group rating by (id,text);
+
+---calculate average rating of the tweet
+avg_rate = foreach word_group generate group, AVG(rating.rate) as tweet_rating;
+
+---get positive and negative tweets
+positive_tweets = filter avg_rate by tweet_rating>=0;
+negative_tweets = filter avg_rate by tweet_rating<0;
+
+---Store results in files
+STORE positive_tweets into '/user/acadgild/project/twitter/positivetweets';
+STORE negative_tweets into '/user/acadgild/project/twitter/negativetweets';
+
+PIG SCRIPT FILE: TwitterSentimentAnalysis.pig
+Screenshot: TwitterSentimentAnalysis.png
+
+------------------------------------------------------------------------------------------------------------
+
+GET THE RESULT BY FOLLOWING BELOW COMMANDS:
+	[acadgild@localhost project]$ hadoop fs -cat /user/acadgild/project/twitter/negativetweets/*
+	[acadgild@localhost project]$ hadoop fs -cat /user/acadgild/project/twitter/positivetweets/*
